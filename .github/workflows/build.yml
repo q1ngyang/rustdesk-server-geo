@@ -128,9 +128,14 @@ jobs:
         run: mkdir _upstream && tar -xzf patched-source.tar.gz -C _upstream
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: 检查 Rust 格式
+        run: cargo fmt --manifest-path _upstream/Cargo.toml -- --check
 
       - name: 运行 Geo Relay 单元测试
-        run: cargo test --manifest-path _upstream/Cargo.toml --lib geo_relay::tests
+        run: cargo test --manifest-path _upstream/Cargo.toml --lib geo_relay
 
   build:
     name: 构建 ${{ matrix.arch }}

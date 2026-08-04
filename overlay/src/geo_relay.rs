@@ -1,122 +1,177 @@
+mod rules;
+
 use hbb_common::log;
-use maxminddb::{path, Reader};
+use maxminddb::{geoip2, Mmap, Reader};
 use once_cell::sync::Lazy;
 use std::{
-    collections::HashMap,
     env,
     net::IpAddr,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        RwLock,
-    },
+    path::Path,
+    sync::{atomic::AtomicUsize, RwLock},
 };
 
-const DEFAULT_DB_PATH: &str = "/root/geoip/GeoLite2-Country.mmdb";
+use rules::{DbRequirements, RuleSet};
+
+const DEFAULT_COUNTRY_DB_PATH: &str = "/root/geoip/GeoLite2-Country.mmdb";
+const DEFAULT_CITY_DB_PATH: &str = "/root/geoip/GeoLite2-City.mmdb";
+const DEFAULT_ASN_DB_PATH: &str = "/root/geoip/GeoLite2-ASN.mmdb";
 
 static STATE: Lazy<RwLock<GeoState>> = Lazy::new(|| RwLock::new(GeoState::disabled()));
 static ROTATION: AtomicUsize = AtomicUsize::new(0);
 
 struct GeoState {
     enabled: bool,
-    reader: Option<Reader<Vec<u8>>>,
-    rules: RelayRules,
-    db_path: String,
+    readers: GeoReaders,
+    rules: RuleSet,
+    warnings: Vec<String>,
 }
 
 impl GeoState {
     fn disabled() -> Self {
         Self {
             enabled: false,
-            reader: None,
-            rules: RelayRules::default(),
-            db_path: String::new(),
+            readers: GeoReaders::default(),
+            rules: RuleSet::empty(),
+            warnings: Vec::new(),
         }
     }
 
     fn from_env() -> Result<Self, String> {
-        let enabled = parse_bool_env("GEO_RELAY_ENABLED", true);
-        if !enabled {
+        if !parse_bool_env("GEO_RELAY_ENABLED", true) {
             return Ok(Self::disabled());
         }
 
         let raw_rules = env::var("GEO_RELAY_RULES").unwrap_or_default();
-        let rules = RelayRules::parse(&raw_rules)?;
-        let db_path = env::var("GEOIP_DB_PATH").unwrap_or_else(|_| DEFAULT_DB_PATH.to_owned());
-        let reader = Reader::open_readfile(&db_path)
-            .map_err(|err| format!("cannot open GeoIP database {db_path}: {err}"))?;
+        let rules = RuleSet::parse(&raw_rules)?;
+        let readers = GeoReaders::from_env()?;
+        let warnings = readers.missing_requirements(rules.requirements());
 
         Ok(Self {
             enabled: true,
-            reader: Some(reader),
+            readers,
             rules,
-            db_path,
+            warnings,
         })
     }
 }
 
 #[derive(Default)]
-struct RelayRules {
-    by_pair: HashMap<String, Vec<Vec<String>>>,
-    fallback: Vec<Vec<String>>,
+struct GeoReaders {
+    country: Option<Reader<Mmap>>,
+    city: Option<Reader<Mmap>>,
+    asn: Option<Reader<Mmap>>,
+    loaded: Vec<String>,
 }
 
-impl RelayRules {
-    fn parse(raw: &str) -> Result<Self, String> {
-        let mut parsed = Self::default();
-        if raw.trim().is_empty() {
-            return Err("GEO_RELAY_RULES is empty".to_owned());
+impl GeoReaders {
+    fn from_env() -> Result<Self, String> {
+        let country_path = env_path_with_legacy(
+            "GEOIP_COUNTRY_DB_PATH",
+            "GEOIP_DB_PATH",
+            DEFAULT_COUNTRY_DB_PATH,
+        );
+        let city_path = env_path("GEOIP_CITY_DB_PATH", DEFAULT_CITY_DB_PATH);
+        let asn_path = env_path("GEOIP_ASN_DB_PATH", DEFAULT_ASN_DB_PATH);
+
+        let country = open_optional_reader("Country", &country_path)?;
+        let city = open_optional_reader("City", &city_path)?;
+        let asn = open_optional_reader("ASN", &asn_path)?;
+        let mut loaded = Vec::new();
+        if country.is_some() {
+            loaded.push(format!("Country={country_path}"));
+        }
+        if city.is_some() {
+            loaded.push(format!("City={city_path}"));
+        }
+        if asn.is_some() {
+            loaded.push(format!("ASN={asn_path}"));
         }
 
-        for item in raw.split(';').map(str::trim).filter(|item| !item.is_empty()) {
-            let (raw_key, raw_value) = item
-                .split_once('=')
-                .ok_or_else(|| format!("invalid Geo relay rule without '=': {item}"))?;
-            let key = normalize_rule_key(raw_key)?;
-            let tiers = parse_tiers(raw_value)?;
-
-            if key == "DEFAULT" {
-                if !parsed.fallback.is_empty() {
-                    return Err("duplicate DEFAULT Geo relay rule".to_owned());
-                }
-                parsed.fallback = tiers;
-            } else if parsed.by_pair.insert(key.clone(), tiers).is_some() {
-                return Err(format!("duplicate Geo relay rule: {key}"));
-            }
-        }
-
-        if parsed.by_pair.is_empty() && parsed.fallback.is_empty() {
-            return Err("GEO_RELAY_RULES has no usable rules".to_owned());
-        }
-
-        Ok(parsed)
+        Ok(Self {
+            country,
+            city,
+            asn,
+            loaded,
+        })
     }
+
+    fn lookup(&self, ip: IpAddr) -> GeoFacts {
+        let mut facts = GeoFacts::default();
+        if let Some(reader) = self.city.as_ref() {
+            lookup_city(reader, ip, &mut facts);
+        }
+        if let Some(reader) = self.country.as_ref() {
+            lookup_country(reader, ip, &mut facts);
+        }
+        if let Some(reader) = self.asn.as_ref() {
+            lookup_asn(reader, ip, &mut facts);
+        }
+        facts
+    }
+
+    fn missing_requirements(&self, requirements: DbRequirements) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if requirements.city && self.city.is_none() {
+            warnings.push("rules use City fields but the City database is unavailable".to_owned());
+        }
+        if requirements.asn && self.asn.is_none() {
+            warnings.push("rules use ASN fields but the ASN database is unavailable".to_owned());
+        }
+        if requirements.country && self.country.is_none() && self.city.is_none() {
+            warnings.push(
+                "rules use Country/Continent fields but neither Country nor City database is available"
+                    .to_owned(),
+            );
+        }
+        warnings
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct GeoFacts {
+    pub(super) continent: Option<String>,
+    pub(super) country: Option<String>,
+    pub(super) subdivision_codes: Vec<String>,
+    pub(super) subdivision_names: Vec<String>,
+    pub(super) city_names: Vec<String>,
+    pub(super) city_geoname_id: Option<u32>,
+    pub(super) asn: Option<u32>,
+    pub(super) asn_org: Option<String>,
 }
 
 pub fn reload() -> String {
     match GeoState::from_env() {
         Ok(new_state) => {
             let enabled = new_state.enabled;
-            let rule_count = new_state.rules.by_pair.len();
-            let db_path = new_state.db_path.clone();
+            let rule_count = new_state.rules.len();
+            let syntax = new_state.rules.syntax_name();
+            let databases = if new_state.readers.loaded.is_empty() {
+                "none".to_owned()
+            } else {
+                new_state.readers.loaded.join(", ")
+            };
+            let warnings = new_state.warnings.clone();
             match STATE.write() {
                 Ok(mut state) => {
                     *state = new_state;
-                    if enabled {
-                        format!(
-                            "Geo relay loaded: {rule_count} country-pair rules, database={db_path}"
-                        )
-                    } else {
-                        "Geo relay disabled by GEO_RELAY_ENABLED".to_owned()
+                    if !enabled {
+                        return "Geo relay disabled by GEO_RELAY_ENABLED".to_owned();
                     }
+                    let mut message = format!(
+                        "Geo relay loaded: {rule_count} ordered rules ({syntax}), databases={databases}"
+                    );
+                    if !warnings.is_empty() {
+                        message.push_str(&format!("; warnings: {}", warnings.join("; ")));
+                    }
+                    message
                 }
                 Err(err) => format!("Geo relay state lock failed: {err}"),
             }
         }
         Err(err) => {
-            // Preserve a previously loaded database/rule set when a periodic update is bad.
             let keeping_previous = STATE
                 .read()
-                .map(|state| state.enabled && state.reader.is_some())
+                .map(|state| state.enabled)
                 .unwrap_or(false);
             if keeping_previous {
                 format!("Geo relay reload failed; keeping previous data: {err}")
@@ -133,40 +188,117 @@ pub fn select_relay(pa: IpAddr, pb: IpAddr, online_relays: &[String]) -> Option<
         return None;
     }
 
-    let reader = state.reader.as_ref()?;
-    let ca = lookup_country(reader, pa);
-    let cb = lookup_country(reader, pb);
-    let pair = match (ca.as_deref(), cb.as_deref()) {
-        (Some(a), Some(b)) => Some(country_pair_key(a, b)),
-        _ => None,
-    };
-
-    if let Some(pair) = pair.as_deref() {
-        if let Some(tiers) = state.rules.by_pair.get(pair) {
-            if let Some(relay) = select_from_tiers(tiers, online_relays) {
-                log::debug!("Geo relay selected {relay} for {pa}/{pb} ({pair})");
-                return Some(relay);
-            }
-        }
-    }
-
-    let relay = select_from_tiers(&state.rules.fallback, online_relays);
-    if let Some(relay) = relay.as_ref() {
-        log::debug!(
-            "Geo relay selected fallback {relay} for {pa}/{pb} ({})",
-            pair.as_deref().unwrap_or("unknown")
-        );
-    }
-    relay
+    let facts_a = state.readers.lookup(pa);
+    let facts_b = state.readers.lookup(pb);
+    let selection = state
+        .rules
+        .select(&facts_a, &facts_b, online_relays, &ROTATION)?;
+    log::debug!(
+        "Geo relay selected {} for {pa}/{pb} by rule '{}' (a={facts_a:?}, b={facts_b:?})",
+        selection.relay,
+        selection.rule_name
+    );
+    Some(selection.relay)
 }
 
-fn lookup_country(reader: &Reader<Vec<u8>>, ip: IpAddr) -> Option<String> {
-    let lookup = reader.lookup(ip).ok()?;
-    let code: Option<String> = lookup
-        .decode_path(&path!["country", "iso_code"])
-        .ok()?;
-    code.map(|value| value.trim().to_ascii_uppercase())
-        .filter(|value| value.len() == 2)
+fn open_optional_reader(label: &str, path: &str) -> Result<Option<Reader<Mmap>>, String> {
+    if path.trim().is_empty() || !Path::new(path).is_file() {
+        return Ok(None);
+    }
+
+    // SAFETY: the bundled updater always writes a new temporary file and atomically renames it.
+    // It never modifies or truncates an inode while an existing Reader still maps that inode.
+    let reader = unsafe { Reader::open_mmap(path) }
+        .map_err(|err| format!("cannot open {label} MMDB {path}: {err}"))?;
+    Ok(Some(reader))
+}
+
+fn lookup_city(reader: &Reader<Mmap>, ip: IpAddr, facts: &mut GeoFacts) {
+    let Ok(result) = reader.lookup(ip) else {
+        return;
+    };
+    let Ok(Some(record)) = result.decode::<geoip2::City>() else {
+        return;
+    };
+
+    set_if_empty(&mut facts.continent, record.continent.code);
+    set_if_empty(&mut facts.country, record.country.iso_code);
+    facts.city_geoname_id = record.city.geoname_id;
+    append_names(&mut facts.city_names, &record.city.names);
+    for subdivision in record.subdivisions {
+        if let Some(code) = subdivision.iso_code {
+            push_unique(&mut facts.subdivision_codes, code);
+        }
+        append_names(&mut facts.subdivision_names, &subdivision.names);
+    }
+}
+
+fn lookup_country(reader: &Reader<Mmap>, ip: IpAddr, facts: &mut GeoFacts) {
+    let Ok(result) = reader.lookup(ip) else {
+        return;
+    };
+    let Ok(Some(record)) = result.decode::<geoip2::Country>() else {
+        return;
+    };
+    set_if_empty(&mut facts.continent, record.continent.code);
+    set_if_empty(&mut facts.country, record.country.iso_code);
+}
+
+fn lookup_asn(reader: &Reader<Mmap>, ip: IpAddr, facts: &mut GeoFacts) {
+    let Ok(result) = reader.lookup(ip) else {
+        return;
+    };
+    let Ok(Some(record)) = result.decode::<geoip2::Asn>() else {
+        return;
+    };
+    facts.asn = record.autonomous_system_number;
+    facts.asn_org = record
+        .autonomous_system_organization
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+}
+
+fn append_names(target: &mut Vec<String>, names: &geoip2::Names<'_>) {
+    for name in [
+        names.english,
+        names.simplified_chinese,
+        names.japanese,
+        names.german,
+        names.spanish,
+        names.french,
+        names.brazilian_portuguese,
+        names.russian,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        push_unique(target, name);
+    }
+}
+
+fn push_unique(target: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() && !target.iter().any(|old| old.eq_ignore_ascii_case(value)) {
+        target.push(value.to_owned());
+    }
+}
+
+fn set_if_empty(target: &mut Option<String>, value: Option<&str>) {
+    if target.is_none() {
+        *target = value
+            .map(|value| value.trim().to_ascii_uppercase())
+            .filter(|value| !value.is_empty());
+    }
+}
+
+fn env_path(name: &str, default: &str) -> String {
+    env::var(name).unwrap_or_else(|_| default.to_owned())
+}
+
+fn env_path_with_legacy(name: &str, legacy_name: &str, default: &str) -> String {
+    env::var(name)
+        .or_else(|_| env::var(legacy_name))
+        .unwrap_or_else(|_| default.to_owned())
 }
 
 fn parse_bool_env(name: &str, default: bool) -> bool {
@@ -177,109 +309,5 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
             _ => default,
         },
         Err(_) => default,
-    }
-}
-
-fn normalize_rule_key(raw: &str) -> Result<String, String> {
-    let key = raw.trim().to_ascii_uppercase();
-    if key == "DEFAULT" {
-        return Ok(key);
-    }
-
-    let (a, b) = key
-        .split_once('-')
-        .ok_or_else(|| format!("invalid country-pair key: {raw}"))?;
-    if !is_country_code(a) || !is_country_code(b) {
-        return Err(format!("invalid country-pair key: {raw}"));
-    }
-    Ok(country_pair_key(a, b))
-}
-
-fn is_country_code(value: &str) -> bool {
-    value.len() == 2 && value.bytes().all(|ch| ch.is_ascii_alphabetic())
-}
-
-fn country_pair_key(a: &str, b: &str) -> String {
-    let a = a.trim().to_ascii_uppercase();
-    let b = b.trim().to_ascii_uppercase();
-    if a <= b {
-        format!("{a}-{b}")
-    } else {
-        format!("{b}-{a}")
-    }
-}
-
-fn parse_tiers(raw: &str) -> Result<Vec<Vec<String>>, String> {
-    let tiers: Vec<Vec<String>> = raw
-        .split('>')
-        .map(|tier| {
-            tier.split(',')
-                .map(str::trim)
-                .filter(|relay| !relay.is_empty())
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .filter(|tier| !tier.is_empty())
-        .collect();
-
-    if tiers.is_empty() {
-        Err(format!("Geo relay rule has no relay servers: {raw}"))
-    } else {
-        Ok(tiers)
-    }
-}
-
-fn select_from_tiers(tiers: &[Vec<String>], online_relays: &[String]) -> Option<String> {
-    for tier in tiers {
-        let available: Vec<&String> = tier
-            .iter()
-            .filter_map(|configured| {
-                online_relays
-                    .iter()
-                    .find(|online| online.eq_ignore_ascii_case(configured))
-            })
-            .collect();
-        if !available.is_empty() {
-            let index = ROTATION.fetch_add(1, Ordering::SeqCst) % available.len();
-            return Some(available[index].clone());
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalizes_country_pairs() {
-        assert_eq!(normalize_rule_key("jp-cn").unwrap(), "CN-JP");
-        assert_eq!(country_pair_key("US", "CN"), "CN-US");
-        assert!(normalize_rule_key("china-jp").is_err());
-    }
-
-    #[test]
-    fn parses_priorities_and_default() {
-        let rules = RelayRules::parse(
-            "CN-CN=hk-1,hk-2>jp;JP-CN=jp>hk-1;DEFAULT=jp>us",
-        )
-        .unwrap();
-        assert_eq!(rules.by_pair["CN-CN"].len(), 2);
-        assert_eq!(rules.by_pair["CN-JP"][0], vec!["jp"]);
-        assert_eq!(rules.fallback[1], vec!["us"]);
-    }
-
-    #[test]
-    fn chooses_first_online_priority_tier() {
-        let tiers = parse_tiers("hk-1,hk-2>jp>us").unwrap();
-        let online = vec!["jp".to_owned(), "us".to_owned()];
-        assert_eq!(select_from_tiers(&tiers, &online), Some("jp".to_owned()));
-    }
-
-    #[test]
-    fn ignores_relays_not_reported_online() {
-        let tiers = parse_tiers("hk-1,hk-2").unwrap();
-        let online = vec!["jp".to_owned()];
-        assert_eq!(select_from_tiers(&tiers, &online), None);
     }
 }

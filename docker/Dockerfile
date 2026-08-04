@@ -9,10 +9,13 @@ COPY --chmod=755 geo-entrypoint.sh /usr/local/bin/geo-entrypoint.sh
 
 ENV HOME=/root \
     GEO_RELAY_ENABLED=true \
-    GEOIP_DB_PATH=/root/geoip/GeoLite2-Country.mmdb \
-    GEOIP_UPDATE_INTERVAL=86400 \
+    GEOIP_COUNTRY_DB_PATH=/root/geoip/GeoLite2-Country.mmdb \
+    GEOIP_CITY_DB_PATH=/root/geoip/GeoLite2-City.mmdb \
+    GEOIP_ASN_DB_PATH=/root/geoip/GeoLite2-ASN.mmdb \
+    GEOIP_UPDATE_INTERVAL=168h \
     GEOIP_UPDATE_ON_START=true \
-    GEOIP_DOWNLOAD_TIMEOUT=180 \
+    GEOIP_FORCE_UPDATE_ON_START=false \
+    GEOIP_DOWNLOAD_TIMEOUT=600 \
     GEOIP_MIN_BYTES=65536
 
 WORKDIR /root

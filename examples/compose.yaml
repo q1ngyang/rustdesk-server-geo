@@ -9,10 +9,17 @@ services:
       RELAY_SERVERS: "${RUSTDESK_RELAY_SERVERS}"
       GEO_RELAY_ENABLED: "${GEO_RELAY_ENABLED:-true}"
       GEO_RELAY_RULES: "${GEO_RELAY_RULES}"
-      GEOIP_DB_URL: "${GEOIP_DB_URL}"
-      GEOIP_DB_PATH: "${GEOIP_DB_PATH:-/root/geoip/GeoLite2-Country.mmdb}"
-      GEOIP_UPDATE_INTERVAL: "${GEOIP_UPDATE_INTERVAL:-86400}"
+      GEOIP_COUNTRY_DB_URL: "${GEOIP_COUNTRY_DB_URL}"
+      GEOIP_CITY_DB_URL: "${GEOIP_CITY_DB_URL:-}"
+      GEOIP_ASN_DB_URL: "${GEOIP_ASN_DB_URL:-}"
+      GEOIP_COUNTRY_DB_PATH: "${GEOIP_COUNTRY_DB_PATH:-/root/geoip/GeoLite2-Country.mmdb}"
+      GEOIP_CITY_DB_PATH: "${GEOIP_CITY_DB_PATH:-/root/geoip/GeoLite2-City.mmdb}"
+      GEOIP_ASN_DB_PATH: "${GEOIP_ASN_DB_PATH:-/root/geoip/GeoLite2-ASN.mmdb}"
+      GEOIP_UPDATE_INTERVAL: "${GEOIP_UPDATE_INTERVAL:-168h}"
       GEOIP_UPDATE_ON_START: "${GEOIP_UPDATE_ON_START:-true}"
+      GEOIP_FORCE_UPDATE_ON_START: "${GEOIP_FORCE_UPDATE_ON_START:-false}"
+      GEOIP_DOWNLOAD_TIMEOUT: "${GEOIP_DOWNLOAD_TIMEOUT:-600}"
+      GEOIP_MIN_BYTES: "${GEOIP_MIN_BYTES:-65536}"
     volumes:
       - /www/wwwroot/rustdesk/server:/root
     network_mode: host

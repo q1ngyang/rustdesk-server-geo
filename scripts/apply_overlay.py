@@ -27,11 +27,29 @@ def main() -> None:
         raise SystemExit(f"not a rustdesk-server checkout: {upstream}")
 
     shutil.copyfile(repo_root / "overlay/src/geo_relay.rs", upstream / "src/geo_relay.rs")
+    shutil.copytree(
+        repo_root / "overlay/src/geo_relay",
+        upstream / "src/geo_relay",
+        dirs_exist_ok=True,
+    )
 
     cargo = upstream / "Cargo.toml"
     cargo_text = cargo.read_text(encoding="utf-8")
-    if 'maxminddb = "0.30"' not in cargo_text:
-        replace_once(cargo, 'flate2 = "1.0"\n', 'flate2 = "1.0"\nmaxminddb = "0.30"\n')
+    if 'maxminddb = { version = "0.30", features = ["mmap"] }' not in cargo_text:
+        replace_once(
+            cargo,
+            'flate2 = "1.0"\n',
+            'flate2 = "1.0"\nmaxminddb = { version = "0.30", features = ["mmap"] }\n',
+        )
+
+    cargo_text = cargo.read_text(encoding="utf-8")
+    if 'serde_yml = "0.0.13"' not in cargo_text:
+        replace_once(
+            cargo,
+            'maxminddb = { version = "0.30", features = ["mmap"] }\n',
+            'maxminddb = { version = "0.30", features = ["mmap"] }\n'
+            'serde_yml = "0.0.13"\n',
+        )
 
     lib = upstream / "src/lib.rs"
     lib_text = lib.read_text(encoding="utf-8")
