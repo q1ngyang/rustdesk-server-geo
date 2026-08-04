@@ -169,10 +169,7 @@ pub fn reload() -> String {
             }
         }
         Err(err) => {
-            let keeping_previous = STATE
-                .read()
-                .map(|state| state.enabled)
-                .unwrap_or(false);
+            let keeping_previous = STATE.read().map(|state| state.enabled).unwrap_or(false);
             if keeping_previous {
                 format!("Geo relay reload failed; keeping previous data: {err}")
             } else {

@@ -133,7 +133,11 @@ impl RuleSet {
 
     fn parse_legacy(raw: &str) -> Result<Self, String> {
         let mut configs = Vec::new();
-        for item in raw.split(';').map(str::trim).filter(|item| !item.is_empty()) {
+        for item in raw
+            .split(';')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
             let (raw_key, raw_value) = item
                 .split_once('=')
                 .ok_or_else(|| format!("invalid legacy rule without '=': {item}"))?;
@@ -187,9 +191,7 @@ impl RelayRule {
     fn matches(&self, facts_a: &GeoFacts, facts_b: &GeoFacts) -> bool {
         let direct = self.client_a.matches(facts_a) && self.client_b.matches(facts_b);
         direct
-            || (self.symmetric
-                && self.client_a.matches(facts_b)
-                && self.client_b.matches(facts_a))
+            || (self.symmetric && self.client_a.matches(facts_b) && self.client_b.matches(facts_a))
     }
 }
 
@@ -420,7 +422,10 @@ fn matches_any_value(first: &[String], second: &[String], allowed: &[String]) ->
 }
 
 fn matches_number(actual: Option<u32>, allowed: &[u32]) -> bool {
-    allowed.is_empty() || actual.map(|actual| allowed.contains(&actual)).unwrap_or(false)
+    allowed.is_empty()
+        || actual
+            .map(|actual| allowed.contains(&actual))
+            .unwrap_or(false)
 }
 
 fn matches_contains(actual: &Option<String>, needles: &[String]) -> bool {
@@ -545,26 +550,13 @@ not:
 "#,
         )
         .unwrap();
-        assert!(matcher.matches(&facts(
-            "CN",
-            "Beijing",
-            4134,
-            "China Telecom"
-        )));
-        assert!(!matcher.matches(&facts(
-            "CN",
-            "Shanghai",
-            9808,
-            "China Mobile"
-        )));
+        assert!(matcher.matches(&facts("CN", "Beijing", 4134, "China Telecom")));
+        assert!(!matcher.matches(&facts("CN", "Shanghai", 9808, "China Mobile")));
     }
 
     #[test]
     fn symmetric_rules_match_reversed_clients() {
-        let rules = RuleSet::parse(
-            "CN-JP=jp>hk;DEFAULT=us",
-        )
-        .unwrap();
+        let rules = RuleSet::parse("CN-JP=jp>hk;DEFAULT=us").unwrap();
         let online = vec!["jp".to_owned(), "us".to_owned()];
         let selected = rules
             .select(
