@@ -11,6 +11,8 @@
 - 规则节点离线时自动尝试下一优先级；没有匹配规则、IP 无法定位、MMDB 不可用或配置错误时，回退到官方轮询逻辑。
 - 所有客户端继续使用同一套 ID Server、API Server 和公钥配置。
 
+> 客户端配置中的“中继服务器 / Relay Server”必须留空。RustDesk 客户端的静态 `relay-server` 选项优先于 `hbbs` 动态下发；一旦填写固定地址，Geo 选择将被客户端覆盖。统一配置仍然可以实现，只需统一填写 ID Server、API Server 和公钥，并统一留空 Relay Server。
+
 ## 镜像
 
 ```yaml
