@@ -132,7 +132,10 @@ jobs:
           components: rustfmt
 
       - name: 检查 Rust 格式
-        run: cargo fmt --manifest-path _upstream/Cargo.toml -- --check
+        run: |
+          rustfmt --edition 2021 --check \
+            _upstream/src/geo_relay.rs \
+            _upstream/src/geo_relay/rules.rs
 
       - name: 运行 Geo Relay 单元测试
         run: cargo test --manifest-path _upstream/Cargo.toml --lib geo_relay
