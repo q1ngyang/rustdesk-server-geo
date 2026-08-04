@@ -1,0 +1,280 @@
+name: 同步上游并构建镜像
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "要构建的 rustdesk-server 标签、分支或提交；留空使用最新正式 Release"
+        required: false
+        type: string
+      force:
+        description: "即使版本标签已经存在也重新构建"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/rustdesk-server-geo
+
+jobs:
+  resolve:
+    name: 解析上游版本
+    runs-on: ubuntu-24.04
+    outputs:
+      upstream_ref: ${{ steps.version.outputs.upstream_ref }}
+      version: ${{ steps.version.outputs.version }}
+      image_tag: ${{ steps.version.outputs.image_tag }}
+      skip: ${{ steps.existing.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取上游和补丁版本
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_REF: ${{ inputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          upstream_ref="${REQUESTED_REF:-}"
+          if [ -z "$upstream_ref" ]; then
+            upstream_ref="$(gh api repos/rustdesk/rustdesk-server/releases/latest --jq .tag_name)"
+          fi
+          patch_version="$(tr -d '[:space:]' < PATCH_VERSION)"
+          version="${upstream_ref#v}"
+          safe_version="$(printf '%s' "$version" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')"
+          if [ -z "$safe_version" ]; then
+            echo "无法从上游引用生成镜像版本" >&2
+            exit 1
+          fi
+          echo "upstream_ref=$upstream_ref" >> "$GITHUB_OUTPUT"
+          echo "version=$safe_version" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${safe_version}-geo.${patch_version}" >> "$GITHUB_OUTPUT"
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: 检查版本是否已经发布
+        id: existing
+        env:
+          IMAGE_TAG: ${{ steps.version.outputs.image_tag }}
+          FORCE_BUILD: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          skip=false
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ] && [ "${FORCE_BUILD:-false}" != "true" ]; then
+            if docker manifest inspect "${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
+              skip=true
+            fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          echo "skip=$skip"
+
+  source:
+    name: 准备带 Geo 补丁的上游源码
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 克隆官方上游
+        env:
+          UPSTREAM_REF: ${{ needs.resolve.outputs.upstream_ref }}
+        run: |
+          git clone --recurse-submodules --depth 1 --branch "$UPSTREAM_REF" \
+            https://github.com/rustdesk/rustdesk-server.git _upstream
+
+      - name: 应用 Geo Relay 扩展
+        run: |
+          python3 scripts/apply_overlay.py _upstream
+          git -C _upstream diff --check
+
+      - name: 打包修改后的源码
+        run: tar -czf patched-source.tar.gz -C _upstream .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patched-source
+          path: patched-source.tar.gz
+          if-no-files-found: error
+          retention-days: 2
+
+  test:
+    name: 测试 Geo 规则和上游兼容性
+    needs:
+      - resolve
+      - source
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: patched-source
+
+      - name: 解压源码
+        run: mkdir _upstream && tar -xzf patched-source.tar.gz -C _upstream
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: 运行 Geo Relay 单元测试
+        run: cargo test --manifest-path _upstream/Cargo.toml --lib geo_relay::tests
+
+  build:
+    name: 构建 ${{ matrix.arch }}
+    needs:
+      - resolve
+      - source
+      - test
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+            platform: linux/amd64
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+            platform: linux/arm64
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: patched-source
+
+      - name: 解压源码
+        run: mkdir _upstream && tar -xzf patched-source.tar.gz -C _upstream
+
+      - name: 安装 Rust 工具链
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+          target: ${{ matrix.target }}
+
+      - name: 交叉编译静态二进制
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --manifest-path _upstream/Cargo.toml --release --all-features --target=${{ matrix.target }}
+          use-cross: true
+
+      - name: 收集二进制
+        run: |
+          mkdir binaries
+          cp "_upstream/target/${{ matrix.target }}/release/hbbs" binaries/
+          cp "_upstream/target/${{ matrix.target }}/release/hbbr" binaries/
+          cp "_upstream/target/${{ matrix.target }}/release/rustdesk-utils" binaries/
+          chmod +x binaries/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.arch }}
+          path: binaries/
+          if-no-files-found: error
+          retention-days: 2
+
+  image:
+    name: 发布 ${{ matrix.arch }} 镜像
+    needs:
+      - resolve
+      - build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+          - arch: arm64
+            platform: linux/arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries-${{ matrix.arch }}
+          path: docker
+
+      - name: 设置二进制权限
+        run: chmod +x docker/hbbs docker/hbbr docker/rustdesk-utils docker/geo-entrypoint.sh
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: 构建并推送单架构镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          platforms: ${{ matrix.platform }}
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.image_tag }}-${{ matrix.arch }}
+            ${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.resolve.outputs.image_tag }}
+            org.opencontainers.image.description=RustDesk Server OSS with environment-driven Geo Relay selection
+
+  manifest:
+    name: 发布多架构清单
+    needs:
+      - resolve
+      - image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: 创建版本和 latest 清单
+        env:
+          IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+        run: |
+          docker buildx imagetools create \
+            --tag "${IMAGE_NAME}:${IMAGE_TAG}" \
+            "${IMAGE_NAME}:${IMAGE_TAG}-amd64" \
+            "${IMAGE_NAME}:${IMAGE_TAG}-arm64"
+          docker buildx imagetools create \
+            --tag "${IMAGE_NAME}:latest" \
+            "${IMAGE_NAME}:latest-amd64" \
+            "${IMAGE_NAME}:latest-arm64"
+
+      - name: 写入任务摘要
+        env:
+          IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+          UPSTREAM_REF: ${{ needs.resolve.outputs.upstream_ref }}
+        run: |
+          {
+            echo "## 构建完成"
+            echo
+            echo "- 上游：\`rustdesk/rustdesk-server@${UPSTREAM_REF}\`"
+            echo "- 镜像：\`${IMAGE_NAME}:${IMAGE_TAG}\`"
+            echo "- 滚动标签：\`${IMAGE_NAME}:latest\`"
+          } >> "$GITHUB_STEP_SUMMARY"

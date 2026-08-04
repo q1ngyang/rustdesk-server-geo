@@ -1,0 +1,7 @@
+* text=auto
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.py text eol=lf
+*.rs text eol=lf
+PATCH_VERSION text eol=lf

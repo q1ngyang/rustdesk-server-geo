@@ -1,0 +1,10 @@
+_upstream/
+patched-source.tar.gz
+docker/hbbs
+docker/hbbr
+docker/rustdesk-utils
+.env
+.idea/
+.vscode/
+__pycache__/
+*.pyc

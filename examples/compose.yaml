@@ -1,0 +1,34 @@
+name: rustdesk-server-geo-example
+
+services:
+  hbbs:
+    image: ghcr.io/q1ngyang/rustdesk-server-geo:latest
+    container_name: rustdesk-hbbs
+    command: hbbs
+    environment:
+      RELAY_SERVERS: "${RUSTDESK_RELAY_SERVERS}"
+      GEO_RELAY_ENABLED: "${GEO_RELAY_ENABLED:-true}"
+      GEO_RELAY_RULES: "${GEO_RELAY_RULES}"
+      GEOIP_DB_URL: "${GEOIP_DB_URL}"
+      GEOIP_DB_PATH: "${GEOIP_DB_PATH:-/root/geoip/GeoLite2-Country.mmdb}"
+      GEOIP_UPDATE_INTERVAL: "${GEOIP_UPDATE_INTERVAL:-86400}"
+      GEOIP_UPDATE_ON_START: "${GEOIP_UPDATE_ON_START:-true}"
+    volumes:
+      - /www/wwwroot/rustdesk/server:/root
+    network_mode: host
+    depends_on:
+      - hbbr
+    restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+
+  hbbr:
+    image: rustdesk/rustdesk-server:latest
+    container_name: rustdesk-hbbr
+    command: hbbr
+    volumes:
+      - /www/wwwroot/rustdesk/server:/root
+    network_mode: host
+    restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
