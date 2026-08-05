@@ -55,6 +55,16 @@ database_due() {
     [ "$age" -ge "$interval" ]
 }
 
+has_mmdb_marker() {
+    file="$1"
+    # MMDB 元数据标记位于文件末尾 128 KiB 内。BusyBox grep 不能可靠扫描含 NUL
+    # 字节的二进制流，因此先转换为纯十六进制文本，再匹配完整标准魔数。
+    tail -c 131072 "$file" 2>/dev/null \
+        | od -An -v -tx1 \
+        | tr -d '[:space:]' \
+        | grep -Fq 'abcdef4d61784d696e642e636f6d'
+}
+
 download_database() {
     label="$1"
     url="$2"
@@ -84,7 +94,7 @@ download_database() {
         return 1
     fi
 
-    if ! tail -c 131072 "$tmp" | grep -q 'MaxMind.com'; then
+    if ! has_mmdb_marker "$tmp"; then
         log "${label} 下载文件缺少 MaxMind DB 标记；拒绝替换"
         rm -f "$tmp"
         trap - INT TERM EXIT
@@ -169,29 +179,36 @@ geoip_update_loop() {
     done
 }
 
-if [ "${1:-}" = "hbbs" ]; then
-    interval_raw="${GEOIP_UPDATE_INTERVAL:-168h}"
-    interval="$(duration_to_seconds "$interval_raw" 604800)"
+main() {
+    if [ "${1:-}" = "hbbs" ]; then
+        interval_raw="${GEOIP_UPDATE_INTERVAL:-168h}"
+        interval="$(duration_to_seconds "$interval_raw" 604800)"
 
-    if is_true "${GEOIP_UPDATE_ON_START:-true}"; then
-        force=0
-        if is_true "${GEOIP_FORCE_UPDATE_ON_START:-false}"; then
-            force=1
+        if is_true "${GEOIP_UPDATE_ON_START:-true}"; then
+            force=0
+            if is_true "${GEOIP_FORCE_UPDATE_ON_START:-false}"; then
+                force=1
+            fi
+            update_all_databases "$interval" "$force" || true
         fi
-        update_all_databases "$interval" "$force" || true
+
+        if has_database_url && [ "$interval" -gt 0 ]; then
+            geoip_update_loop "$interval" &
+            log "MMDB 自动更新已启用，周期为 ${interval_raw}（${interval} 秒）"
+        else
+            log "MMDB 周期更新已禁用"
+        fi
     fi
 
-    if has_database_url && [ "$interval" -gt 0 ]; then
-        geoip_update_loop "$interval" &
-        log "MMDB 自动更新已启用，周期为 ${interval_raw}（${interval} 秒）"
-    else
-        log "MMDB 周期更新已禁用"
+    if [ "$#" -eq 0 ]; then
+        log "缺少启动命令，请指定 hbbs、hbbr 或 rustdesk-utils"
+        exit 64
     fi
-fi
 
-if [ "$#" -eq 0 ]; then
-    log "缺少启动命令，请指定 hbbs、hbbr 或 rustdesk-utils"
-    exit 64
-fi
+    exec "$@"
+}
 
-exec "$@"
+# 测试脚本可以只加载函数，不启动服务。
+if ! is_true "${GEOIP_ENTRYPOINT_SOURCE_ONLY:-false}"; then
+    main "$@"
+fi

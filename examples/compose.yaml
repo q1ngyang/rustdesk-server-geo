@@ -4,9 +4,11 @@ services:
   hbbs:
     image: ghcr.io/q1ngyang/rustdesk-server-geo:latest
     container_name: rustdesk-hbbs
-    command: hbbs
+    command:
+      - hbbs
+      - -r
+      - "${RUSTDESK_RELAY_SERVERS}"
     environment:
-      RELAY_SERVERS: "${RUSTDESK_RELAY_SERVERS}"
       GEO_RELAY_ENABLED: "${GEO_RELAY_ENABLED:-true}"
       GEO_RELAY_RULES: "${GEO_RELAY_RULES}"
       GEOIP_COUNTRY_DB_URL: "${GEOIP_COUNTRY_DB_URL}"

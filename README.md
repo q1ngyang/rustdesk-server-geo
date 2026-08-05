@@ -114,7 +114,7 @@ client_a:
 
 规则默认 `symmetric: true`，即 `client_a/client_b` 交换后仍可匹配。需要方向敏感时可在规则中设置 `symmetric: false`。
 
-`relay_tiers` 从上到下表示故障转移优先级；同一行数组中的多个在线节点轮询。节点名称必须与 `RELAY_SERVERS` 完全对应，如包含端口，规则也必须包含相同端口。
+`relay_tiers` 从上到下表示故障转移优先级；同一行数组中的多个在线节点轮询。节点名称必须与传给 `hbbs -r/--relay-servers` 的列表完全对应，如包含端口，规则也必须包含相同端口。不要使用下划线形式的 `RELAY_SERVERS`，OSS `hbbs` 不会读取它；如改用环境变量，官方名称是带连字符的 `RELAY-SERVERS`。
 
 ## MMDB 自动更新与内存
 
@@ -147,7 +147,7 @@ GEOIP_ASN_DB_URL=https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-AS
 
 ## 多节点部署
 
-1. 中心服务器运行本镜像的 `hbbs`，`RELAY_SERVERS` 包含全部中继节点。
+1. 中心服务器运行本镜像的 `hbbs`，通过 `-r`/`--relay-servers` 传入全部中继节点。
 2. 中国、日本、美国等服务器分别运行 `hbbr`，可以继续使用官方镜像。
 3. 所有节点使用同一套 RustDesk 密钥；Cloudflare 记录使用“仅 DNS”。
 4. `hbbs` 先剔除健康检查失败的中继，规则只从剩余在线节点中选择。

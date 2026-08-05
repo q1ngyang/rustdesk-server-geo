@@ -120,9 +120,14 @@ jobs:
       - source
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           name: patched-source
+
+      - name: 测试 MMDB 下载校验
+        run: sh tests/test_geo_entrypoint.sh
 
       - name: 解压源码
         run: mkdir _upstream && tar -xzf patched-source.tar.gz -C _upstream
